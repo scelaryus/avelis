@@ -1,202 +1,55 @@
-"""GFI Platform - FastAPI Application Entry Point."""
-from fastapi import FastAPI, Request
+"""
+GFI v7.0 — FastAPI Application Entry Point.
+
+Serves the complete ERP system: 40 migrations, 136 models, 28 engines.
+"""
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
-
-from app.config import get_settings
-from app.api import (
-    documents, workflows, accounting, hr, adv, admin,
-    auth as auth_router, cost_center, legal, spi, treasury,
-    registry, imports, chantier, achats, ressources,
-)
-from app.api import finance_associes as finance_associes_router
-from app.api import bim as bim_router
-from app.api import mfa as mfa_router
-from app.services.blocking_rules import BlockingError
-
-settings = get_settings()
-
-
-def _apply_sqlite_dev_patches() -> None:
-    """Patch the SQLite dev schema forward when Alembic history is not SQLite-safe.
-
-    The repository contains migrations that use PostgreSQL-only types, so local
-    SQLite files can drift behind the ORM models. This helper keeps the dev DB
-    compatible with the current app features that rely on newer columns.
-    """
-    from sqlalchemy import text as sa_text
-    from app.database import sync_engine
-
-    table_columns: dict[str, set[str]] = {}
-
-    def load_columns(conn, table: str) -> set[str]:
-        if table not in table_columns:
-            rows = conn.execute(sa_text(f"PRAGMA table_info({table})")).fetchall()
-            table_columns[table] = {row[1] for row in rows}
-        return table_columns[table]
-
-    def ensure_column(conn, table: str, column: str, sql_type: str) -> None:
-        cols = load_columns(conn, table)
-        if column not in cols:
-            conn.execute(sa_text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
-            cols.add(column)
-
-    with sync_engine.begin() as conn:
-        ensure_column(conn, "users", "mfa_secret", "VARCHAR(64)")
-        ensure_column(conn, "users", "mfa_enabled", "BOOLEAN DEFAULT 0")
-        ensure_column(conn, "employees", "user_id", "VARCHAR(36)")
-        ensure_column(conn, "employees", "professional_address", "TEXT")
-        ensure_column(conn, "employees", "activities", "TEXT")
-        ensure_column(conn, "employees", "upcoming_activity_due_date", "DATE")
-        ensure_column(conn, "employees", "is_active", "BOOLEAN DEFAULT 1")
-        ensure_column(conn, "employees", "manager_id", "VARCHAR(36)")
-        ensure_column(conn, "employees", "mentor_id", "VARCHAR(36)")
-        ensure_column(conn, "employees", "company", "VARCHAR(255)")
-        ensure_column(conn, "employees", "function_category", "VARCHAR(50)")
-
-        ensure_column(conn, "hr_tasks", "approval_status", "VARCHAR(32) DEFAULT 'PENDING_ESTIMATE'")
-        ensure_column(conn, "hr_tasks", "employee_estimated_time", "FLOAT")
-        ensure_column(conn, "hr_tasks", "employee_estimated_price", "NUMERIC(18, 2)")
-        ensure_column(conn, "hr_tasks", "estimated_at", "DATETIME")
-        ensure_column(conn, "hr_tasks", "manager_final_time", "FLOAT")
-        ensure_column(conn, "hr_tasks", "manager_final_price", "NUMERIC(18, 2)")
-        ensure_column(conn, "hr_tasks", "manager_approved_at", "DATETIME")
-        ensure_column(conn, "hr_tasks", "manager_approved_by", "VARCHAR(36)")
-        ensure_column(conn, "hr_tasks", "proof_document_id", "VARCHAR(36)")
-        ensure_column(conn, "hr_tasks", "proof_uploaded_at", "DATETIME")
-        ensure_column(conn, "hr_tasks", "ai_score", "FLOAT")
-        ensure_column(conn, "hr_tasks", "ai_note", "TEXT")
-        ensure_column(conn, "hr_tasks", "ai_evaluated_at", "DATETIME")
-        ensure_column(conn, "hr_tasks", "manager_validated", "BOOLEAN DEFAULT 0")
-        ensure_column(conn, "hr_tasks", "manager_validated_at", "DATETIME")
-
-        conn.execute(sa_text(
-            """
-            CREATE TABLE IF NOT EXISTS user_permissions (
-                id VARCHAR(36) PRIMARY KEY,
-                tenant_id VARCHAR(36) NOT NULL,
-                user_id VARCHAR(36) NOT NULL,
-                module VARCHAR(100) NOT NULL,
-                can_read BOOLEAN NOT NULL DEFAULT 0,
-                can_write BOOLEAN NOT NULL DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, module)
-            )
-            """
-        ))
-        conn.execute(sa_text(
-            "CREATE INDEX IF NOT EXISTS ix_user_permissions_user ON user_permissions (user_id)"
-        ))
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup and shutdown events."""
-    import structlog
-    structlog.configure(
-        processors=[
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
-        ]
-    )
-
-    # ── Verify database connectivity ────────────────────────────────────
-    from app.database import async_engine
-    _is_sqlite = settings.DATABASE_URL.startswith("sqlite")
-    try:
-        from sqlalchemy import text as sa_text
-        async with async_engine.connect() as conn:
-            if _is_sqlite:
-                await conn.execute(sa_text("SELECT 1"))
-            else:
-                result = await conn.execute(sa_text("SELECT version()"))
-                pg_version = result.scalar()
-                structlog.get_logger().info("postgresql_connected", version=pg_version)
-    except Exception as exc:
-        structlog.get_logger().critical("database_connection_failed", error=str(exc))
-        raise SystemExit(f"Database connection failed: {exc}") from exc
-
-    # Auto-create tables (dev convenience — production uses Alembic)
-    from app.database import Base
-    import app.models.core       # noqa: F401
-    import app.models.hr         # noqa: F401
-    import app.models.adv        # noqa: F401
-    import app.models.financial  # noqa: F401
-    import app.models.legal      # noqa: F401
-    import app.models.spi        # noqa: F401
-    import app.models.treasury   # noqa: F401
-    import app.models.registry   # noqa: F401
-    import app.models.integrations  # noqa: F401
-    import app.models.finance_associes  # noqa: F401
-    import app.models.bim_edd    # noqa: F401
-
-    if _is_sqlite or settings.ENVIRONMENT == "development":
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    if _is_sqlite:
-        _apply_sqlite_dev_patches()
-
-    # Seed default tenant + admin user if DB is empty
-    from app.database import AsyncSessionLocal
-    from app.models.core import Tenant, User
-    from sqlalchemy import select
-    import uuid
-    from app.services.rbac import ROLE_ALIASES
-
-    async with AsyncSessionLocal() as session:
-        # Normalize legacy stored roles to canonical identifiers.
-        existing_users = (await session.execute(select(User))).scalars().all()
-        roles_updated = False
-        for existing_user in existing_users:
-            canonical_role = ROLE_ALIASES.get(existing_user.role)
-            if canonical_role and canonical_role != existing_user.role:
-                existing_user.role = canonical_role
-                roles_updated = True
-        if roles_updated:
-            await session.commit()
-
-        result = await session.execute(select(User).limit(1))
-        if result.scalar_one_or_none() is None:
-            tenant_id = str(uuid.uuid4())
-            tenant = Tenant(id=tenant_id, name="AVELIS PROMOTION", code="AVELIS", description="Société de promotion immobilière", settings={})
-            session.add(tenant)
-
-            from passlib.context import CryptContext
-            pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            admin_user = User(
-                id=str(uuid.uuid4()),
-                tenant_id=tenant_id,
-                email="admin@gfi.ma",
-                hashed_password=pwd.hash("admin123"),
-                full_name="Admin",
-                role="SUPER_ADMIN",
-                is_active=True,
-            )
-            session.add(admin_user)
-            await session.commit()
-            print("=== Seeded admin user: admin@gfi.ma / admin123 ===")
-
-    # ── Start APScheduler ───────────────────────────────────────────────
-    from app.services.scheduler import scheduler, register_jobs
-    register_jobs(scheduler)
-    scheduler.start()
-
-    yield
-
-    # Shutdown
-    scheduler.shutdown(wait=False)
-
 
 app = FastAPI(
-    title=settings.APP_NAME,
-    version=settings.APP_VERSION,
-    lifespan=lifespan,
-    docs_url="/api/docs",
-    openapi_url="/api/openapi.json",
+    title="GFI v7.0 — GFI ERP",
+    version="7.0.0",
+    description="ERP system managing 12 legal entities, 16 projects, 4 RF types.",
 )
+
+# ── Register API routers ──────────────────────────────────────────────────────
+from app.api.v1.foundation import router as foundation_router
+from app.api.v1.finance import router as finance_router
+from app.api.v1.adv import router as adv_router
+from app.api.v1.drh import router as drh_router
+from app.api.v1.operations import router as operations_router
+from app.api.v1.system import router as system_router
+from app.api.v1.juridique import router as juridique_router
+from app.api.v1.auth import router as auth_router
+from app.api.v1.cc import router as cc_router
+from app.api.v1.ged import router as ged_router
+from app.api.v1.agents import router as agents_router
+from app.api.v1.spi import router as spi_router
+from app.api.v1.spi360 import router as spi360_router
+from app.api.v1.drh_agents_api import router as drh_agents_router
+from app.api.v1.dis import router as dis_router
+from app.api.v1.stock import router as stock_router
+from app.api.v1.supplier import router as supplier_router
+
+app.include_router(foundation_router, prefix="/api/v1")
+app.include_router(finance_router, prefix="/api/v1")
+app.include_router(adv_router, prefix="/api/v1")
+app.include_router(drh_router, prefix="/api/v1")
+app.include_router(operations_router, prefix="/api/v1")
+app.include_router(system_router, prefix="/api/v1")
+app.include_router(juridique_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(cc_router, prefix="/api/v1")
+app.include_router(ged_router, prefix="/api/v1")
+app.include_router(stock_router, prefix="/api/v1")
+app.include_router(supplier_router, prefix="/api/v1")
+app.include_router(agents_router, prefix="/api/v1")
+app.include_router(spi_router, prefix="/api/v1")
+app.include_router(spi360_router, prefix="/api/v1")
+app.include_router(drh_agents_router, prefix="/api/v1")
+app.include_router(dis_router, prefix="/api/v1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -206,36 +59,231 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── BlockingError global handler ────────────────────────────────────────
-@app.exception_handler(BlockingError)
-async def blocking_error_handler(request: Request, exc: BlockingError):
-    return JSONResponse(
-        status_code=422,
-        content={"blocked": True, "message": str(exc), "payload": exc.payload},
-    )
 
-# Mount routers
-app.include_router(auth_router.router, prefix="/api/v1/auth")
-app.include_router(documents.router, prefix="/api/v1/documents")
-app.include_router(workflows.router, prefix="/api/v1/workflows")
-app.include_router(accounting.router, prefix="/api/v1/accounting")
-app.include_router(hr.router, prefix="/api/v1/hr")
-app.include_router(adv.router, prefix="/api/v1/adv")
-app.include_router(admin.router, prefix="/api/v1/admin")
-app.include_router(cost_center.router, prefix="/api/v1/cost-center")
-app.include_router(legal.router, prefix="/api/v1/legal")
-app.include_router(spi.router, prefix="/api/v1/spi")
-app.include_router(treasury.router, prefix="/api/v1/treasury")
-app.include_router(registry.router, prefix="/api/v1/registry")
-app.include_router(imports.router, prefix="/api/v1/imports")
-app.include_router(finance_associes_router.router, prefix="/api/v1/finance")
-app.include_router(bim_router.router, prefix="/api/v1/bim")
-app.include_router(mfa_router.router, prefix="/api/v1/auth/mfa")
-app.include_router(chantier.router, prefix="/api/v1/chantier")
-app.include_router(achats.router, prefix="/api/v1/achats")
-app.include_router(ressources.router, prefix="/api/v1/ressources")
+@app.get("/")
+async def root():
+    return {
+        "system": "GFI v7.0",
+        "status": "running",
+        "entities": 12,
+        "projects": 16,
+        "migrations": 40,
+        "models": 136,
+        "engines": 28,
+    }
 
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": settings.APP_VERSION}
+    """System health check."""
+    from app.models import Base
+    return {
+        "status": "healthy",
+        "tables": len(Base.metadata.tables),
+        "database": "pending_connection",
+    }
+
+
+@app.get("/api/stats")
+async def stats():
+    """System statistics."""
+    from app.models import Base
+    tables = sorted(Base.metadata.tables.keys())
+    return {
+        "total_tables": len(tables),
+        "tables": tables,
+        "modules": {
+            "foundation": ["company", "associate", "project", "auth_user"],
+            "financial": ["financial_transaction", "cff_calculation", "journal_entry"],
+            "adv": ["lot", "dossier_adv", "payment", "notary_escrow"],
+            "cost_center": ["cost_center_node", "cost_center_entry", "margin_calculation"],
+            "hr": ["employee", "employee_contract", "payslip", "leave_request"],
+            "legal": ["legal_case", "legal_contract", "legal_compliance_rule"],
+            "operations": ["operation", "operation_planning_task"],
+            "ged": ["document", "detection_finding"],
+        },
+    }
+
+
+@app.get("/api/entities")
+async def entities():
+    """List all 12 legal entities."""
+    return {
+        "entities": [
+            {"code": "ETS-DK", "name": "ETS Alpha Immobilier", "form": "ETS", "status": "ACTIF"},
+            {"code": "SARL-DP", "name": "SARL Beta Promotion", "form": "SARL", "status": "ACTIF"},
+            {"code": "SARL-DBPI", "name": "SARL Gamma Construction", "form": "SARL", "status": "ACTIF"},
+            {"code": "SARL-OC", "name": "SARL Delta Habitat", "form": "SARL", "status": "ACTIF"},
+            {"code": "SARL-SEN", "name": "SARL Epsilon Batiment", "form": "SARL", "status": "ACTIF"},
+            {"code": "SARL-EP", "name": "SARL Zeta Promotion", "form": "SARL", "status": "ACTIF"},
+            {"code": "EURL-BIM", "name": "EURL Eta Construction", "form": "EURL", "status": "ACTIF"},
+            {"code": "SARL-AMF", "name": "SARL Theta Beton", "form": "SARL", "status": "DISSOUTE"},
+            {"code": "EURL-BAY", "name": "EURL Iota Services", "form": "EURL", "status": "SATELLITE"},
+            {"code": "SARL-M60", "name": "SARL Kappa Rapide", "form": "SARL", "status": "ACTIF"},
+            {"code": "SARL-ARC", "name": "SARL Lambda Design", "form": "SARL", "status": "ACTIF"},
+            {"code": "SCI-DEN", "name": "SCI Mu Foncier", "form": "SCI", "status": "ACTIF"},
+        ]
+    }
+
+
+@app.get("/api/projects")
+async def projects():
+    """List all 16 projects."""
+    return {
+        "projects": [
+            {"code": "EDEN", "name": "Residence Horizon", "entity": "ETS-DK", "status": "ACTIF", "clients": 154},
+            {"code": "JASMIN", "name": "Residence Soleil", "entity": "ETS-DK", "status": "ACTIF", "clients": 100},
+            {"code": "OPERA", "name": "Residence Perle", "entity": "SARL-DP", "status": "ACTIF"},
+            {"code": "LYS", "name": "Residence Cristal", "entity": "SARL-DBPI", "status": "ACTIF"},
+            {"code": "IRENE", "name": "Residence Azur", "entity": "SARL-DP", "status": "ACTIF"},
+            {"code": "MAGNOLIA", "name": "Residence Oasis", "entity": "SARL-OC", "status": "ACTIF", "clients": 18},
+            {"code": "AUREA", "name": "Residence Emeraude", "entity": "SARL-DP", "status": "ACTIF", "clients": 199},
+            {"code": "ASTERIA", "name": "Asteria", "entity": "SARL-SEN", "status": "ACTIF", "clients": 52},
+            {"code": "MOSQUEE", "name": "Mosquée Taoura", "entity": "ETS-DK", "status": "DONATION"},
+            {"code": "T21000", "name": "Terrain 21 000 m²", "entity": "ETS-DK", "status": "TERRAIN"},
+            {"code": "T5000", "name": "Terrain 5 000 m²", "entity": "SARL-DBPI", "status": "EN_ATTENTE"},
+            {"code": "T2400", "name": "Terrain 2 400 m²", "entity": "SARL-DBPI", "status": "TERRAIN"},
+            {"code": "ELITE-DRIVE", "name": "Elite Drive", "entity": "EURL-BIM", "status": "A_DEVELOPPER"},
+            {"code": "ALLO-MAISON", "name": "Allo Maison", "entity": "SARL-DP", "status": "A_DEVELOPPER"},
+            {"code": "PFSB", "name": "PFSB", "entity": "EURL-BIM", "status": "A_DEVELOPPER"},
+            {"code": "DG", "name": "DG", "entity": "SARL-DBPI", "status": "A_DEVELOPPER"},
+        ]
+    }
+
+
+@app.get("/api/associates")
+async def associates():
+    """List the 9 associates with their ownership structures."""
+    return {
+        "founders": [
+            {"name": "BENALI Karim", "role": "DAF / Gerant", "founder": True,
+             "companies": {"ETS-DK": 25, "SARL-DP": 25, "SARL-DBPI": 60, "SARL-OC": 60,
+                           "SARL-SEN": 60, "SARL-EP": 60, "EURL-BIM": 60, "SARL-AMF": 33.33,
+                           "SARL-M60": 60, "SARL-ARC": 60, "SCI-DEN": 60}},
+            {"name": "HAMIDI Said", "role": "Associe", "founder": True,
+             "companies": {"ETS-DK": 25, "SARL-DP": 25, "SARL-DBPI": 20, "SARL-OC": 20,
+                           "SARL-SEN": 20, "SARL-EP": 20, "EURL-BIM": 20, "SARL-AMF": 33.33,
+                           "SARL-M60": 20, "SARL-ARC": 20, "SCI-DEN": 20}},
+            {"name": "KHELIFI Omar", "role": "Associe", "founder": True,
+             "companies": {"ETS-DK": 25, "SARL-DP": 25, "SARL-DBPI": 20, "SARL-OC": 20,
+                           "SARL-SEN": 20, "SARL-EP": 20, "EURL-BIM": 20, "SARL-AMF": 33.33,
+                           "SARL-M60": 20, "SARL-ARC": 20, "SCI-DEN": 20}},
+            {"name": "MANSOURI Fatima", "role": "Associee", "founder": True,
+             "companies": {"ETS-DK": 25, "SARL-DP": 25}},
+        ],
+        "project_associates": [
+            {"name": "TOUNSI Rachid", "role": "Associe projet"},
+            {"name": "SLIMANI Youcef", "role": "Associe projet"},
+            {"name": "CHERIF Nabil", "role": "Associe projet"},
+            {"name": "DJELLOUL Amir", "role": "Associe projet"},
+            {"name": "RAHMANI Sofiane", "role": "Associe projet"},
+        ],
+    }
+
+
+@app.get("/api/rf-rules")
+async def rf_rules():
+    """RF classification rules."""
+    from app.rf import RealiteFinanciere, PaymentMode, RF_PAYMENT_RULES
+    return {
+        "rf_types": {
+            "RF1": "Réel Déclaré — cheque/virement only",
+            "RF2": "Réel Non Déclaré — cash only, encrypted",
+            "RF3": "Fictif Déclaré — inter-group, triggers CFF",
+            "RF4": "Fictif Non Déclaré — rare, DAF review",
+        },
+        "payment_rules": {
+            rf.value: [pm.value for pm in modes]
+            for rf, modes in RF_PAYMENT_RULES.items()
+        },
+        "views": {
+            "vue_officielle": "RF1 + RF3",
+            "vue_interne": "RF1 + RF2 + RF3 + RF4",
+            "prix_reel": "RF1 + RF2",
+            "ecart": "RF2 + RF4",
+        },
+    }
+
+
+@app.get("/api/cff/example")
+async def cff_example():
+    """CFF worked example: AMENFORT 5M HT → ETS-DK for EDEN."""
+    from decimal import Decimal, ROUND_HALF_UP
+    def r2(v): return v.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    ht = Decimal("5000000")
+    tva = r2(ht * Decimal("19") / 100)
+    tap = r2(ht * Decimal("1") / 100)
+    ibs_base = ht - tap
+    ibs = r2(ibs_base * Decimal("19") / 100)
+    stamp = Decimal("2500")
+    cff = tva + tap + ibs + stamp
+
+    return {
+        "scenario": "AMENFORT emits 5M DA HT RF3 to ETS-DK for EDEN",
+        "steps": {
+            "1_TVA": f"{tva} DA (19%)",
+            "2_TAP": f"{tap} DA (1%)",
+            "3_IBS_base": f"{ibs_base} DA",
+            "4_IBS": f"{ibs} DA (19%)",
+            "5_Stamp": f"{stamp} DA (capped)",
+        },
+        "CFF_TOTAL": f"{cff} DA",
+        "distribution": {
+            "Ahmed": f"{r2(cff * Decimal('33.3334') / 100)} DA (33.33% AMENFORT)",
+            "Mohamed": f"{r2(cff * Decimal('33.3333') / 100)} DA (33.33% AMENFORT)",
+            "Yazid": f"{r2(cff - r2(cff * Decimal('33.3334') / 100) - r2(cff * Decimal('33.3333') / 100))} DA (33.33%)",
+            "Yamina": "0 DA (NOT in AMENFORT — Y4 rule)",
+        },
+        "critical_rule": "Uses EMITTING COMPANY % (AMENFORT), NOT project % (EDEN)",
+    }
+
+
+@app.get("/api/migrations")
+async def migrations():
+    """Complete migration chain."""
+    return {
+        "total": 40,
+        "chain": [
+            "001: Foundation (company, associate, auth_user)",
+            "002: Soft-delete triggers (KT-10)",
+            "003: Projects + ownership (16 projects, 70 rows)",
+            "004: RBAC (18 roles, 55 permissions, 225 mappings)",
+            "005: Alias resolution (123 aliases, pg_trgm)",
+            "006: Formulaire system (46 templates)",
+            "007: Financial transactions (RF constraints, pgcrypto)",
+            "008: CFF engine (5-step, V6/V7)",
+            "009: Accounting SCF (58 accounts, journals)",
+            "010: CCA treasury (36 CCAs, R-003)",
+            "011: Treasury closing (7-step, SHA-256, period lock)",
+            "012: EDD inventory (lot state machine)",
+            "013: ADV dossier (17-state machine)",
+            "014: Payment system (6 PAY-C constraints)",
+            "015: Notary escrow (FIN-005, NOTAIRE-001)",
+            "016: Credit workflow (9 steps, 5 tiers)",
+            "017: Fonds propres (3-case, installments)",
+            "018: Document generation (14 templates)",
+            "019: Centre de Coûts (6-level hierarchy)",
+            "020: CC categories (16 categories)",
+            "021: Margin + distribution (3-step, 4 views)",
+            "022: Verification (10 checks, 5-level alerts)",
+            "023: GACEB (120M advance, RAP)",
+            "024: Associate operations (withdrawals, founding)",
+            "025: Procurement (SoD, CUMP)",
+            "026: Project management (advancement, tiers)",
+            "027: Legal governance (preemption, capital calls)",
+            "028: HR foundation (employee, contracts)",
+            "029: Payroll (10-step, IRG, CNAS)",
+            "030: Payslip verification (6-level L1-L6)",
+            "031: Onboarding (5 phases, 7 docs)",
+            "032: Access control (S4A, badges)",
+            "033: Leave management (10 types, fraud L5)",
+            "034: Offboarding (STC, disciplinary)",
+            "035: Compliance (ANPDP, visitor QR)",
+            "036: GED pipeline (7 layers, dedup)",
+            "037: Detection engine (15 patterns)",
+            "038: Méta-IA (double DAF approval)",
+            "039: Legal module (8 tables, 6 AI agents)",
+            "040: Operations (11-source budget, Gantt, S-curve)",
+        ],
+    }

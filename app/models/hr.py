@@ -1,150 +1,242 @@
-"""GFI Platform - HR domain models."""
-import uuid
+"""
+GFI v7.0 — HR Foundation: Employee, Contract, Department, JobPosition,
+SalaryStructure, SalaryComponent.
+
+Employee lifecycle: draft -> onboarding -> active -> suspended -> offboarding -> archived
+Contract: draft -> pending_validation -> validated_drh -> validated_dg -> validated_pdg -> active
+CDD requalification: auto CDI if continues past end_date without renewal.
+22 DRH AI agents coordinate via LangGraph event cascade.
+"""
+
 from sqlalchemy import (
-    Column, String, Text, Boolean, Integer, Float, DateTime, ForeignKey,
-    Enum as SAEnum, Numeric, Date, JSON, func
+    Boolean, Column, Date, DateTime, ForeignKey, Integer,
+    Numeric, String, Text,
 )
-from app.database import Base
-import enum
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import relationship
+
+from app.models.base import Base, GFIBase
 
 
-class EmploymentStatus(str, enum.Enum):
-    ACTIVE = "ACTIVE"
-    INACTIVE = "INACTIVE"
-    TERMINATED = "TERMINATED"
-    ON_LEAVE = "ON_LEAVE"
+class Department(GFIBase, Base):
+    """Organizational department within an entity."""
+
+    __tablename__ = "department"
+
+    code = Column(String(20), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    name_ar = Column(String(255), nullable=True)
+    parent_department_id = Column(
+        UUID(as_uuid=True), ForeignKey("department.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    manager_id = Column(UUID(as_uuid=True), nullable=True)
+    is_active = Column(Boolean, nullable=False, server_default="true")
+
+    parent = relationship("Department", remote_side="Department.id")
+
+    def __repr__(self):
+        return f"<Department {self.code} {self.name}>"
 
 
-class PayrollStatus(str, enum.Enum):
-    DRAFT = "DRAFT"
-    PROPOSED = "PROPOSED"
-    APPROVED = "APPROVED"
-    COMMITTED = "COMMITTED"
-    REJECTED = "REJECTED"
+class JobPosition(GFIBase, Base):
+    """Job position definition with skills, equipment, and access profiles."""
 
+    __tablename__ = "job_position"
 
-class Employee(Base):
-    __tablename__ = "employees"
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=False)
-    employee_number = Column(String(50), nullable=False)
-    first_name = Column(String(255), nullable=False)
-    last_name = Column(String(255), nullable=False)
-    email = Column(String(255))
-    phone = Column(String(50))
-    professional_address = Column(Text)
-    activities = Column(Text)
-    hire_date = Column(Date)
-    upcoming_activity_due_date = Column(Date)
-    termination_date = Column(Date)
-    status = Column(SAEnum(EmploymentStatus), default=EmploymentStatus.ACTIVE)
-    is_active = Column(Boolean, default=True)
-    department = Column(String(100))
-    position = Column(String(255))
-    cost_center_code = Column(String(50))
-    base_salary = Column(Numeric(18, 2))
-    currency = Column(String(3), default="DZD")
-    bank_account = Column(String(50))
-    tax_id = Column(String(50))
-    social_security_number = Column(String(50))
-    # ── Extensions for SPI & Org hierarchy ──
-    department_id = Column(String(36), ForeignKey("departments.id"), nullable=True)
-    manager_id = Column(String(36), ForeignKey("employees.id"), nullable=True)
-    mentor_id = Column(String(36), ForeignKey("employees.id"), nullable=True)
-    function_category = Column(String(50))  # SUPPORT, COMMERCIAL, etc.
-    company = Column(String(255))  # company name from employee dataset
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)  # linked User account
-    metadata_ = Column("metadata", JSON, default={})
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
-class PayrollProposal(Base):
-    __tablename__ = "payroll_proposals"
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=False)
-    employee_id = Column(String(36), ForeignKey("employees.id"), nullable=False)
-    period_id = Column(String(36), ForeignKey("accounting_periods.id"))
-    period_label = Column(String(50))
-    status = Column(SAEnum(PayrollStatus), default=PayrollStatus.DRAFT)
-    gross_salary = Column(Numeric(18, 2))
-    deductions = Column(JSON, default={})  # {type: amount}
-    contributions = Column(JSON, default={})  # employer contributions
-    net_salary = Column(Numeric(18, 2))
-    journal_entry_id = Column(String(36), ForeignKey("journal_entries.id"))
-    notes = Column(Text)
-    created_by = Column(String(36), ForeignKey("users.id"))
-    approved_by = Column(String(36), ForeignKey("users.id"))
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
-class TaskApprovalStatus(str, enum.Enum):
-    PENDING_ESTIMATE = "PENDING_ESTIMATE"  # assigned, awaiting employee estimate
-    ESTIMATED = "ESTIMATED"               # employee submitted estimate
-    APPROVED = "APPROVED"                  # manager approved estimate or overrode
-    IN_PROGRESS = "IN_PROGRESS"            # employee working on it
-    PROOF_SUBMITTED = "PROOF_SUBMITTED"    # employee uploaded proof
-    AI_EVALUATED = "AI_EVALUATED"          # AI scored the proof
-    VALIDATED = "VALIDATED"                # manager validated AI score → affects payroll
-    REJECTED = "REJECTED"                  # manager rejected proof/estimate
-
-
-class HRTask(Base):
-    __tablename__ = "hr_tasks"
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=False)
-    entreprise_id = Column(String(36), ForeignKey("entreprises.id"))
-    employee_id = Column(String(36), ForeignKey("employees.id"))
-    task_type = Column(String(100), nullable=False)
-    title = Column(String(500), nullable=False)
-    description = Column(Text)
-    plan_date = Column(Date, nullable=False)
-    required_role = Column(String(100))
-    source_text = Column(Text)
-    status = Column(String(50), default="pending")  # pending, in_progress, completed, cancelled
-    assigned_to = Column(String(36), ForeignKey("users.id"))
-    due_date = Column(Date)
-    completed_at = Column(DateTime)
-    completed_by = Column(String(36), ForeignKey("users.id"))
-    created_by = Column(String(36), ForeignKey("users.id"))
-    # ── Estimate & Approval workflow ──
-    approval_status = Column(SAEnum(TaskApprovalStatus), default=TaskApprovalStatus.PENDING_ESTIMATE)
-    employee_estimated_time = Column(Float)  # hours
-    employee_estimated_price = Column(Numeric(18, 2))  # billable value
-    estimated_at = Column(DateTime)
-    manager_final_time = Column(Float)  # manager-approved hours
-    manager_final_price = Column(Numeric(18, 2))  # manager-approved billable value
-    manager_approved_at = Column(DateTime)
-    manager_approved_by = Column(String(36), ForeignKey("users.id"))
-    # ── Proof & AI evaluation ──
-    proof_document_id = Column(String(36), ForeignKey("documents.id"))  # uploaded proof
-    proof_uploaded_at = Column(DateTime)
-    ai_score = Column(Float)  # 0-100 score from AI evaluation
-    ai_note = Column(Text)    # AI textual assessment
-    ai_evaluated_at = Column(DateTime)
-    manager_validated = Column(Boolean, default=False)  # manager approved/rejected AI score
-    manager_validated_at = Column(DateTime)
-    # ── Manager rating & salary adjust ──
-    manager_rating = Column(Integer)
-    manager_feedback = Column(Text)
-    rated_at = Column(DateTime)
-    salary_adjustment_amount = Column(Numeric(18, 2), default=0)
-    salary_adjustment_applied = Column(Boolean, default=False)
-    metadata_ = Column("metadata", JSON, default={})
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
-class TaskNotification(Base):
-    __tablename__ = "task_notifications"
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=False)
-    task_id = Column(String(36), ForeignKey("hr_tasks.id"), nullable=False)
-    employee_id = Column(String(36), ForeignKey("employees.id"))
-    user_id = Column(String(36), ForeignKey("users.id"))
+    code = Column(String(20), nullable=False, index=True)
     title = Column(String(255), nullable=False)
-    message = Column(Text)
-    is_read = Column(Boolean, default=False)
-    read_at = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.now())
+    title_ar = Column(String(255), nullable=True)
+    department_id = Column(
+        UUID(as_uuid=True), ForeignKey("department.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
+    required_skills = Column(JSONB, nullable=True)
+    equipment_profile = Column(JSONB, nullable=True)
+    access_zone_profile = Column(JSONB, nullable=True)
+    auth_role_mapping = Column(JSONB, nullable=True)
+    # e.g., ["CHEF_CHANTIER"] -> auto-assigned on hire
+
+    grade = Column(String(20), nullable=True)
+    salary_min = Column(Numeric(15, 2), nullable=True)
+    salary_max = Column(Numeric(15, 2), nullable=True)
+    is_active = Column(Boolean, nullable=False, server_default="true")
+
+    def __repr__(self):
+        return f"<JobPosition {self.code} {self.title}>"
+
+
+class SalaryStructure(GFIBase, Base):
+    """Salary structure: defines pay components per grade/entity."""
+
+    __tablename__ = "salary_structure"
+
+    code = Column(String(30), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    grade = Column(String(20), nullable=True)
+    effective_from = Column(Date, nullable=False)
+    effective_to = Column(Date, nullable=True)
+    components = Column(JSONB, nullable=False)
+    # [{code, name, type: FIXE/VARIABLE/PRIME, amount_or_rate, taxable, cnas_subject}]
+    is_active = Column(Boolean, nullable=False, server_default="true")
+
+    def __repr__(self):
+        return f"<SalaryStructure {self.code} {self.name}>"
+
+
+class Employee(GFIBase, Base):
+    """Full employee record per CDC-DRH section 1.3.1."""
+
+    __tablename__ = "employee"
+
+    # ── Identity ─────────────────────────────────────────────────────────
+    matricule = Column(String(20), unique=True, nullable=False, index=True)
+    first_name = Column(String(100), nullable=False)
+    last_name = Column(String(100), nullable=False)
+    first_name_ar = Column(String(100), nullable=True)
+    last_name_ar = Column(String(100), nullable=True)
+
+    birth_date = Column(Date, nullable=False)
+    birth_place = Column(String(255), nullable=True)
+    nationality = Column(String(50), nullable=False, server_default="'Algerienne'")
+    gender = Column(String(1), nullable=False)  # M or F
+
+    # ── Family ───────────────────────────────────────────────────────────
+    marital_status = Column(String(20), nullable=False, server_default="'celibataire'")
+    children_count = Column(Integer, nullable=False, server_default="0")
+
+    # ── Official IDs ─────────────────────────────────────────────────────
+    national_id = Column(String(18), nullable=True, unique=True)
+    social_security_number = Column(String(20), nullable=True, unique=True)
+    tax_id = Column(String(30), nullable=True)
+
+    # ── Contact ──────────────────────────────────────────────────────────
+    address_line1 = Column(String(255), nullable=True)
+    address_line2 = Column(String(255), nullable=True)
+    city = Column(String(100), nullable=True)
+    wilaya = Column(String(50), nullable=True)
+    phone_personal = Column(String(20), nullable=True)
+    phone_work = Column(String(20), nullable=True)
+    email_personal = Column(String(255), nullable=True)
+    email_work = Column(String(255), nullable=True)
+
+    # ── Assignment ───────────────────────────────────────────────────────
+    department_id = Column(
+        UUID(as_uuid=True), ForeignKey("department.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    job_position_id = Column(
+        UUID(as_uuid=True), ForeignKey("job_position.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    manager_id = Column(
+        UUID(as_uuid=True), ForeignKey("employee.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # ── Dates ────────────────────────────────────────────────────────────
+    hire_date = Column(Date, nullable=True)
+    seniority_date = Column(Date, nullable=True)
+
+    # ── Badge ────────────────────────────────────────────────────────────
+    badge_rfid_number = Column(String(50), nullable=True, unique=True)
+    photo_url = Column(Text, nullable=True)
+
+    # ── Banking ──────────────────────────────────────────────────────────
+    bank_name = Column(String(100), nullable=True)
+    bank_rib = Column(String(25), nullable=True)
+
+    # ── Emergency contact ────────────────────────────────────────────────
+    emergency_contact_name = Column(String(255), nullable=True)
+    emergency_contact_phone = Column(String(20), nullable=True)
+    emergency_contact_relation = Column(String(50), nullable=True)
+
+    # ── Documents ────────────────────────────────────────────────────────
+    document_checklist_status = Column(JSONB, nullable=True)
+
+    # ── Lifecycle ────────────────────────────────────────────────────────
+    # DRAFT, ONBOARDING, ACTIVE, SUSPENDED, OFFBOARDING, ARCHIVED
+    status = Column(String(20), nullable=False, server_default="'DRAFT'")
+
+    # ── Auth link ────────────────────────────────────────────────────────
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("auth_user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    department = relationship("Department")
+    job_position = relationship("JobPosition")
+    manager = relationship("Employee", remote_side="Employee.id")
+
+    def __repr__(self):
+        return f"<Employee {self.matricule} {self.first_name} {self.last_name}>"
+
+
+class EmployeeContract(GFIBase, Base):
+    """Employment contract with triple validation and CDD requalification."""
+
+    __tablename__ = "employee_contract"
+
+    employee_id = Column(
+        UUID(as_uuid=True), ForeignKey("employee.id", ondelete="RESTRICT"),
+        nullable=False, index=True,
+    )
+
+    # ── Type ─────────────────────────────────────────────────────────────
+    contract_type = Column(String(20), nullable=False)
+    # CDI, CDD, CHANTIER, STAGE, INTERIM
+    cdd_reason = Column(Text, nullable=True)
+    # MANDATORY if CDD (Article 12, Loi 90-11)
+
+    # ── Dates ────────────────────────────────────────────────────────────
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=True)
+    # MANDATORY for CDD/CHANTIER/STAGE
+    probation_end_date = Column(Date, nullable=True)
+
+    # ── Salary ───────────────────────────────────────────────────────────
+    salary_base = Column(Numeric(15, 2), nullable=False)
+    # >= 20000 (SNMG)
+    salary_structure_id = Column(
+        UUID(as_uuid=True), ForeignKey("salary_structure.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    work_schedule_id = Column(UUID(as_uuid=True), nullable=True)
+    workplace_site_id = Column(UUID(as_uuid=True), nullable=True)
+
+    # ── Notice / trial ───────────────────────────────────────────────────
+    trial_duration_days = Column(Integer, nullable=True)
+    notice_period_days = Column(Integer, nullable=True)
+
+    # ── Document ─────────────────────────────────────────────────────────
+    template_used = Column(String(100), nullable=True)
+    document_url = Column(Text, nullable=True)
+    qr_verification_code = Column(String(100), nullable=True, unique=True)
+
+    # ── Triple validation: DRH -> DG -> PDG ──────────────────────────────
+    # DRAFT, PENDING_VALIDATION, VALIDATED_DRH, VALIDATED_DG,
+    # VALIDATED_PDG, ACTIVE, SUSPENDED, TERMINATED, ARCHIVED
+    status = Column(String(20), nullable=False, server_default="'DRAFT'")
+
+    validated_drh_by = Column(UUID(as_uuid=True), nullable=True)
+    validated_drh_at = Column(DateTime(timezone=True), nullable=True)
+    validated_dg_by = Column(UUID(as_uuid=True), nullable=True)
+    validated_dg_at = Column(DateTime(timezone=True), nullable=True)
+    validated_pdg_by = Column(UUID(as_uuid=True), nullable=True)
+    validated_pdg_at = Column(DateTime(timezone=True), nullable=True)
+
+    # ── Termination ──────────────────────────────────────────────────────
+    termination_date = Column(Date, nullable=True)
+    termination_reason = Column(String(30), nullable=True)
+    # FIN_CDD, FIN_CHANTIER, DEMISSION, LICENCIEMENT_FAUTE,
+    # LICENCIEMENT_ECONOMIQUE, RETRAITE, DECES, ACCORD_MUTUEL
+
+    # ── CDD requalification flag ─────────────────────────────────────────
+    requalified_as_cdi = Column(Boolean, nullable=False, server_default="false")
+    requalification_date = Column(Date, nullable=True)
+
+    employee = relationship("Employee")
+
+    def __repr__(self):
+        return f"<EmployeeContract {self.contract_type} {self.status}>"

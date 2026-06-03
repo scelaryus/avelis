@@ -1,25 +1,32 @@
-"""Alembic environment configuration."""
-from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
-from alembic import context
-import sys
+"""
+Alembic environment — auto-generates migrations from SQLAlchemy models.
+
+Reads DATABASE_URL from .env (falls back to alembic.ini value).
+"""
+
 import os
+import sys
+from logging.config import fileConfig
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from alembic import context
+from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool
 
-from app.database import Base
-from app.models.core import *  # noqa: F401, F403
-from app.models.hr import *  # noqa: F401, F403
-from app.models.adv import *  # noqa: F401, F403
-from app.models.financial import *  # noqa: F401, F403
-from app.models.legal import *  # noqa: F401, F403
-from app.models.spi import *  # noqa: F401, F403
-from app.models.treasury import *  # noqa: F401, F403
-from app.models.registry import *  # noqa: F401, F403
-from app.models.finance_associes import *  # noqa: F401, F403
-from app.models.bim_edd import *  # noqa: F401, F403
+# Ensure the project root is importable.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+load_dotenv()
+
+# Import all models so Alembic sees them.
+from app.models import Base  # noqa: E402
 
 config = context.config
+
+# Override sqlalchemy.url from env var if present.
+db_url = os.getenv("DATABASE_URL")
+if db_url:
+    config.set_main_option("sqlalchemy.url", db_url)
+
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
@@ -27,6 +34,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
+    """Generate SQL without connecting to the database."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -39,6 +47,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    """Run migrations against a live database."""
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

@@ -1,26 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo/frontend\" && npx tsc --noEmit 2>&1 | head -30)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo\" && .venv/Scripts/python -c \"from app.services.edd_excel_import import import_edd_from_excel; print\\('OK'\\)\" 2>&1)",
-      "Bash(find /Users/DELL/Desktop/Projects/avelis-promo -name \"ADVPage*\" -type f 2>/dev/null | head -10)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo\" && .venv/Scripts/python -c \"from app.agents.module_router import run; print\\('OK'\\)\" 2>&1)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo/frontend\" && npx tsc --noEmit 2>&1 | head -20)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo\" && .venv/Scripts/python -c \"\nfrom app.services.import_orchestrator import run_import_session, _ensure_system_entries_for_session\nfrom app.agents.module_router import run, _create_receivable\nprint\\('All imports OK'\\)\n\" 2>&1)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo/frontend\" && npm run build 2>&1 | tail -10)",
-      "Bash(sleep 5 && curl -s http://localhost:8000/api/health 2>&1)",
-      "Bash(curl -s http://localhost:8000/api/health 2>&1)",
-      "Bash(find \"C:\\\\Users\\\\DELL\\\\Desktop\\\\Projects\\\\avelis-promo\\\\app\\\\api\" -type f -name \"*.py\" 2>/dev/null | head -20)",
-      "Bash(find \"C:\\\\Users\\\\DELL\\\\Desktop\\\\Projects\\\\avelis-promo\\\\tests\" -type f -name \"*.py\" 2>/dev/null | head -20)",
-      "Bash(ls -lh /c/Users/DELL/Desktop/Projects/avelis-promo/app/services/*.py)",
-      "Bash(find \"C:\\\\Users\\\\DELL\\\\Desktop\\\\Projects\\\\avelis-promo\\\\app\\\\api\" -type f -name \"*.py\" 2>/dev/null | grep -E \"\\(legal|mfa|registry|spi|treasury|workflows\\)\" | head -10)",
-      "Bash(ls -lh \"C:\\\\Users\\\\DELL\\\\Desktop\\\\Projects\\\\avelis-promo\\\\alembic\\\\versions\\\\*.py\" 2>/dev/null | tail -10)",
-      "Bash(python -c \"from app.models.financial import RealiteFinanciere, EntrepriseAssocie, CompensationST, Transaction; print\\('financial OK'\\)\" 2>&1)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo\" && python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload 2>&1 | head -20)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo/frontend\" && npx vite --port 3000 2>&1 | head -15)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo\" && python -c \"from app.main import app; print\\('OK'\\)\" 2>&1)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo\" && python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload 2>&1)",
-      "Bash(cd \"C:/Users/DELL/Desktop/Projects/avelis-promo/frontend\" && npx vite --port 3000 2>&1)"
+      "Bash(npm --version)",
+      "Bash(pip install:*)",
+      "Bash(python -c \":*)"
     ]
   }
 }

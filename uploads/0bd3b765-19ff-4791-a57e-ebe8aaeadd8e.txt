@@ -1,0 +1,14 @@
+FACTURE N FAC-2025-00187
+BATIMETAL SARL
+Adresse: Zone Industrielle Rouiba, Alger
+NIF: 0012345678901
+Date: 15/03/2025
+
+A: SARL DBPI Immobilier
+Projet: AUREA - Lot Fondations
+Designation: Fourniture beton pret a emploi B25
+Quantite: 450 m3
+Prix unitaire: 8500 DA/m3
+Montant HT: 3 825 000 DA
+TVA 19%: 726 750 DA
+Montant TTC: 4 551 750 DA
